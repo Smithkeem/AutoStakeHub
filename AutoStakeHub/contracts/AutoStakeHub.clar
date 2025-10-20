@@ -266,6 +266,67 @@
   )
 )
 
+;; Advanced compound staking with automatic reward reinvestment and tier upgrade
+;; This function allows stakers to compound their rewards back into their stake,
+;; automatically calculating new APY based on extended lock period and increased principal.
+;; Provides optimal capital efficiency and maximizes long-term returns for committed stakers.
+(define-public (compound-stake-with-tier-upgrade (additional-lock-days uint))
+  (let
+    (
+      (stake-data (unwrap! (map-get? stakes { staker: tx-sender }) err-not-found))
+      (pending-rewards (unwrap! (calculate-rewards-internal tx-sender) err-calculation-error))
+      (current-amount (get amount stake-data))
+      (current-lock-days (get lock-period-days stake-data))
+      (blocks-elapsed (- block-height (get start-block stake-data)))
+      (current-lock-blocks (* current-lock-days blocks-per-day))
+      (remaining-lock-blocks (if (> current-lock-blocks blocks-elapsed)
+                                (- current-lock-blocks blocks-elapsed)
+                                u0))
+    )
+    ;; Validations
+    (asserts! (not (var-get emergency-pause)) err-owner-only)
+    (asserts! (> pending-rewards u0) err-no-rewards)
+    (asserts! (is-valid-tier additional-lock-days) err-invalid-tier)
+    (asserts! (>= additional-lock-days current-lock-days) err-invalid-tier)
+    
+    ;; Calculate new parameters
+    (let
+      (
+        (new-principal (+ current-amount pending-rewards))
+        (new-lock-days additional-lock-days)
+        (new-apy (get-tier-apy new-lock-days))
+        (new-start-block block-height)
+      )
+      ;; Update stake with compounded amount and new tier
+      (map-set stakes
+        { staker: tx-sender }
+        {
+          amount: new-principal,
+          start-block: new-start-block,
+          lock-period-days: new-lock-days,
+          tier-apy: new-apy,
+          last-claim-block: block-height,
+          total-claimed: (+ (get total-claimed stake-data) pending-rewards)
+        }
+      )
+      
+      ;; Update global statistics
+      (var-set total-staked (+ (var-get total-staked) pending-rewards))
+      (var-set total-rewards-distributed (+ (var-get total-rewards-distributed) pending-rewards))
+      
+      ;; Return compound summary
+      (ok {
+        compounded-amount: pending-rewards,
+        new-principal: new-principal,
+        previous-apy: (get tier-apy stake-data),
+        new-apy: new-apy,
+        new-lock-period: new-lock-days,
+        estimated-maturity-block: (+ block-height (* new-lock-days blocks-per-day))
+      })
+    )
+  )
+)
+
 ;; Read-only functions
 (define-read-only (get-stake-info (staker principal))
   (ok (map-get? stakes { staker: staker }))
